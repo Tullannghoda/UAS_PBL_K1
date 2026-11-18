@@ -10,11 +10,11 @@
 
 > Nama lengkap, NIM, dan username GitHub akan dilengkapi sebelum pengumpulan final.
 
-| No | Anggota | Pengalaman | Peran Utama | Tanggung Jawab Layer |
+| No | Anggota | Pengalaman | Peran Utama | Tanggung Jawab Modul & Branch |
 | --- | --- | --- | --- | --- |
-| 1 | Anggota 1 *(nama & NIM menyusul)* | Terbiasa Go & Git | Git Master + Service & Arsitektur | Inisialisasi repo public, branch protection, review & merge PR, logika bisnis & smart lead-time (`app/service`), transaksi & konkurensi |
-| 2 | Anggota 2 *(nama & NIM menyusul)* | Pernah membuat REST API | Database & Repository | Skema SQL (`migrations/`), koneksi DB (`database/`), dan implementasi akses data (`app/repository`) |
-| 3 | Anggota 3 *(nama & NIM menyusul)* | Sedang belajar Go | Model, Routing, Config & Docs | Struct entity & DTO (`app/model`), `route/`, `helper/`, `middleware/`, `config/`, serta dokumentasi (`README.md`, Swagger) |
+| 1 | Orang 1 *(nama & NIM menyusul)* | Terbiasa Go & Git | Git Master + Fondasi, Auth & RBAC | Setup repo public & branch protection, review & merge PR, scaffold core (`config`, `database`, `health`, `main`), Auth/RBAC (`CurrentUser`, `RequireAuth`, `RequirePermission`), dan notifikasi outbox (tahap UAS) |
+| 2 | Orang 2 *(nama & NIM menyusul)* | Pernah membuat REST API | Helper + Katalog 5 Kategori Kue | `AppError`, helper response, validator, `ErrorHandler`, serta modul Katalog Kue utuh (migrations, model, repository, service, route) dan setup Swagger (tahap UAS) |
+| 3 | Orang 3 *(nama & NIM menyusul)* | Sedang belajar Go | TxManager + Docs + Pesanan & Smart Lead Time | `DBTX` & `TxManager`, dokumentasi (`README.md`, ERD, role matrix), modul Pesanan Made-to-Order + Smart Dynamic Lead Time + upload referensi + konfirmasi pembayaran kasir, serta Docker & testing (tahap UAS) |
 
 ---
 
@@ -338,30 +338,74 @@ UAS_KEL1_PBL/
 
 ---
 
-## 10. Alur Kolaborasi GitHub, Micro Commits, & Pembagian Branch (3 Anggota)
+## 10. Ketentuan Kerja GitHub, Micro Commits, & Pembagian Branch (3 Anggota)
 
-1. **Repo Public Terpisah:** Git Master membuat repositori GitHub public baru khusus proyek ini, mengundang 2 anggota sebagai collaborator, commit inisialisasi awal di `main`, lalu mengaktifkan **Branch Protection** pada `main` (wajib Pull Request).
-2. **Pembagian Branch per Anggota:**
-   - **Anggota 1 (Git Master + Service):** `main` (init repo), `feat/service-catalog`, `feat/service-smart-leadtime`, `feat/service-order`
-   - **Anggota 2 (Database + Repository):** `feat/migrations`, `feat/repository-catalog`, `feat/repository-order`
-   - **Anggota 3 (Model + Route + Config/Docs):** `feat/model-catalog`, `feat/model-order`, `feat/route-config`, `docs/readme-erd`
-3. **Aturan Micro Commits:**
-   - Satu commit mewakili satu perubahan spesifik, contoh:
-     - `chore: init go module and clean architecture directories`
-     - `feat(migration): create categories table with dynamic lead time columns`
-     - `feat(model): add Order and OrderItem structs with custom_spec JSONB`
-     - `feat(service): implement CalculateEarliestPickup dynamic lead time rule`
-     - `feat(service): enforce min_order_qty for traditional cake category`
-     - `feat(repository): add atomic increment for daily_production_loads`
-4. **Review & Merge:** Setiap PR di-review Git Master (lolos `go build ./...`, `go vet ./...`, tanpa layer `controller`/`handler`) lalu di-merge memakai **Create a merge commit** (bukan Squash).
+### 10.1 Aturan Inti
+1. **Jangan pernah commit atau push langsung ke `main`.**
+2. **Satu branch = satu sub-fitur/tugas**, dikerjakan dengan beberapa **micro commits** (kecil, fokus satu perubahan per commit, bukan satu commit besar).
+3. Branch dibuat **saat mulai mengerjakan tugas** dari `main` terbaru (tidak perlu pre-create semua branch di awal agar terhindar dari konflik).
+4. Semua perubahan masuk ke `main` melalui **Pull Request (PR)**.
+5. Hanya **Git Master (Orang 1)** yang melakukan review dan merge PR ke `main` menggunakan **Create a merge commit** (dilarang Squash agar kontribusi tiap anggota tetap tercatat di *Insights -> Contributors*).
+6. Format pesan commit mengikuti Conventional Commits `type(scope): pesan` (`feat`, `fix`, `test`, `docs`, `chore`, `refactor`), contoh: `feat(model): add Category and Product structs`.
+7. Seluruh kode wajib mengikuti Clean Architecture modul praktikum (**tanpa** folder atau istilah `controller` maupun `handler`).
+
+### 10.2 Setup Awal (Sekali per Laptop)
+- Terima undangan collaborator di GitHub.
+- Clone repositori: `git clone https://github.com/Tullannghoda/UAS_PBL_K1.git && cd UAS_PBL_K1`
+- Atur identitas Git agar email **sama persis** dengan akun GitHub:
+  - `git config user.name "Nama Kamu"`
+  - `git config user.email "email-yang-sama-dengan-akun-GitHub"`
+- Setelah `.env.example` tersedia di `main`, salin menjadi `.env` secara lokal. Jangan pernah meng-commit `.env`.
+
+### 10.3 Rencana Pembagian Branch & Urutan Kerja
+- **Orang 1 (Git Master - Fondasi + Auth & RBAC):**
+  - `chore/scaffold-core`: `go.mod`, `.gitignore`, `.env.example`, `config`, logger, pool PostgreSQL, `/health`, `main.go`
+  - `feat/auth-rbac`: migration `users` & RBAC, model, repository, JWT, middleware auth/permission, auth service
+  - `feat/outbox-notifications` *(Tahap UAS)*: outbox + worker notifikasi status pesanan
+- **Orang 2 (Helper + Katalog 5 Kategori Kue - Fitur Utuh Pertama):**
+  - `feat/helper-errorhandler`: `AppError`, helper response, validator, centralized `ErrorHandler`
+  - `feat/catalog-data`: migration 5 kategori kue, produk, varian, topping + model + repository
+  - `feat/catalog-service`: aturan bisnis katalog + service + route katalog
+  - `docs/swagger-setup` *(Tahap UAS)*: anotasi Swagger & generate `docs/`
+- **Orang 3 (TxManager + Docs + Pesanan & Smart Lead Time):**
+  - `feat/database-txmanager`: interface `DBTX` & `TxManager`
+  - `docs/readme-erd`: `README.md`, gambar ERD, role matrix, dan pembaruan nama/NIM anggota
+  - `feat/order-data`: migration `orders`, `order_items`, `daily_production_loads`, `order_status_logs` + model + repository
+  - `feat/order-smart-leadtime`: aturan Smart Dynamic Lead Time (`4 jam -> 5 jam`, H-1 kue basah + `min_order_qty`, H-14 kue kering), upload referensi, service pesanan, & konfirmasi pembayaran manual kasir
+  - `chore/docker-tests` *(Tahap UAS)*: `Dockerfile`, `docker-compose.yml`, unit & integration test
+
+**Urutan Fase Kerja:**
+- **Fase 1 (Fondasi paralel):** Orang 1 mengerjakan `chore/scaffold-core` & `feat/auth-rbac`, Orang 2 mengerjakan `feat/helper-errorhandler`, Orang 3 mengerjakan `feat/database-txmanager` & `docs/readme-erd`.
+- **Fase 2 (Fitur Inti):** Setelah fondasi masuk `main`, Orang 2 menyelesaikan fitur Katalog Kue sampai jalan utuh, dan Orang 3 mengerjakan modul Pesanan + Smart Lead Time + konfirmasi bayar kasir.
+- **Fase 3 (Finalisasi UAS):** Notifikasi outbox/worker, dokumentasi Swagger, unit/integration testing, dan Docker Compose.
+
+### 10.4 Alur Kerja Harian, Cek Sebelum Commit, Konflik, & Larangan
+1. Ambil `main` terbaru lalu buat branch tugas:
+   ```bash
+   git checkout main
+   git pull origin main
+   git checkout -b feat/nama-branch
+   ```
+2. Kerjakan perubahan dengan micro commits dan push ke branch tugas:
+   ```bash
+   git status
+   git add <file-yang-dikerjakan>
+   git commit -m "feat(model): add Product struct"
+   git push -u origin feat/nama-branch
+   ```
+3. Buka GitHub, buat Pull Request ke `main`, lalu tunggu review dan merge dari Git Master. Setelah PR ter-merge, kembali ke `main` dan jalankan `git pull origin main` sebelum membuat branch baru.
+4. **Cek sebelum commit:** `git branch` memastikan `*` tidak berada di `main`; `git status` memastikan `.env`, `logs/`, dan `uploads/` tidak ikut; tab *Files changed* pada PR hanya memuat file milik tugas tersebut.
+5. **Penanganan konflik:** Jangan menimpa pekerjaan anggota lain. Laporkan di grup; konflik pada `main.go` dan `route/route.go` diselesaikan oleh Git Master.
+6. **Dilarang keras:** push langsung ke `main`, commit `.env`/`logs/`/`uploads/`, menjalankan `git push --force`, atau memakai Squash saat merge PR.
 
 ---
 
 ## 11. Roadmap Progres
 
 ### Progres 1 (Laporan Progres Kamis, 19 November 2026)
-- [x] Rancangan sistem lengkap di `project.md` (5 kategori kue made-to-order, konfirmasi pembayaran manual di tempat, Smart Dynamic Lead Time, role RBAC, skema DB + ERD, desain API, dan pembagian 3 anggota).
-- [ ] Pembuatan repositori GitHub public terpisah + pengisian nama/NIM anggota.
+- [x] Rancangan sistem lengkap di `project.md` (5 kategori kue made-to-order, konfirmasi pembayaran manual di tempat, Smart Dynamic Lead Time, role RBAC, skema DB + ERD, desain API, dan ketentuan kerja GitHub 3 anggota).
+- [x] Pembuatan repositori GitHub public terpisah (`https://github.com/Tullannghoda/UAS_PBL_K1.git`).
+- [ ] Pengisian nama/NIM anggota, aktivasi branch protection `main`, dan undang collaborator.
 - [ ] Inisialisasi struktur folder boilerplate Go & `README.md` (plus gambar ERD).
 
 ### Progres 2 (Menuju UAS)
