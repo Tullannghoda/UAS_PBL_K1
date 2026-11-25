@@ -1,331 +1,245 @@
-# Rancangan Sistem: Sistem Pemesanan Toko Kue Made-to-Order (Pre-Order)
+# Spesifikasi Teknis & Rancangan Lengkap: BakeOrder (UAS Kelompok 1)
 
-> **Status Dokumen:** Progres Awal Rancangan Sistem (Kelompok 1 - Praktikum Pemrograman Backend Lanjut, Semester 5)  
 > **Repositori GitHub:** https://github.com/Tullannghoda/UAS_PBL_K1.git  
-> **Target Penyelesaian Penuh:** Ujian Akhir Semester (UAS)
+> **Tujuan Dokumen:** Dokumen spesifikasi teknis serinci-rincinya (*single source of truth*) untuk seluruh anggota tim dan asisten AI masing-masing saat mengimplementasikan kode per branch.  
+> **Catatan Scope Dosen:** Cakupan endpoint dipersempit ke **inti-intinya saja (15 endpoint)** dengan data katalog memakai **SQL seeder**, namun **seluruh Modul 1–12 tetap diterapkan** dan pekerjaan dibagi merata ke **3 anggota** lewat Pull Request & micro commits.
 
 ---
 
-## 1. Informasi Kelompok & Pembagian Peran (3 Anggota)
+## 1. Aturan Arsitektur & Konvensi Kode Wajib (Konteks untuk AI & Tim)
 
-> Nama lengkap, NIM, dan username GitHub akan dilengkapi sebelum pengumpulan final.
+Setiap anggota (dan AI yang membantu) **wajib** mematuhi konvensi proyek berikut agar kode dari 3 orang menyatu bersih tanpa konflik gaya:
 
-| No | Anggota | Pengalaman | Peran Utama | Tanggung Jawab Modul & Branch |
+1. **Bahasa & Framework:** Go (`go 1.26+`), `github.com/gofiber/fiber/v2`, PostgreSQL (`github.com/jackc/pgx/v5/pgxpool`), MongoDB (`go.mongodb.org/mongo-driver/v2`), Redis + Asynq (`github.com/hibiken/asynq`), JWT (`github.com/golang-jwt/jwt/v5`), Validator (`github.com/go-playground/validator/v10`), Swagger (`github.com/swaggo/swag` + `github.com/gofiber/swagger`).
+2. **Clean Architecture Sesuai Modul Praktikum:**
+   - **DILARANG keras** membuat folder, file, struct, atau istilah `controller` maupun `handler`.
+   - `app/model`: hanya struct domain, request DTO (dengan tag `json` & `validate`), serta response DTO bernama (jangan kembalikan `fiber.Map` pada endpoint yang didokumentasikan Swagger). Tidak boleh mengimpor `fiber` atau driver database.
+   - `app/repository`: definisikan **interface** terlebih dahulu beserta implementasi struct privat (`*PostgresRepository` / `*MongoRepository`). Repository PostgreSQL menerima `DBTX` dan menyediakan method `WithTx(tx DBTX)` untuk transaksi.
+   - `app/service`: logika bisnis murni dipisah ke file `*_rules.go` (mudah di-unit-test tanpa DB/Fiber), sedangkan method HTTP Fiber (`func (s *XService) Method(c *fiber.Ctx) error`) ada di `*_service.go`.
+3. **Standar Error & Response:**
+   - Seluruh error bisnis mengembalikan `*helper.AppError` (via `helper.BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `Validation`, `NewError`, `Internal`) agar diformat seragam oleh centralized `ErrorHandler` di `config/app.go`.
+   - Response sukses memakai `helper.Success`, `helper.Created` (mengisi header `Location`), `helper.SuccessCursor`, atau `helper.NoContent`.
+4. **Keamanan:** Jangan pernah commit `.env`, `logs/`, atau `uploads/` (tambahkan ke `.gitignore`, gunakan `.env.example`).
+
+---
+
+## 2. Pemetaan Seluruh Modul Perkuliahan (Modul 1–12)
+
+| Modul | Topik Perkuliahan | Implementasi Konkret di BakeOrder |
+| --- | --- | --- |
+| **Modul 1** | Persiapan & Sintaks Go Fiber | Server HTTP Fiber v2, flag `-role=api \| worker \| all`, pembacaan `.env` |
+| **Modul 2** | REST API & HTTP Deep Dive | Method `GET`/`POST`/`PATCH`, status `200`/`201`/`400`/`401`/`403`/`404`/`409`/`422`, validasi struct, centralized `ErrorHandler` + `AppError` |
+| **Modul 3** | Database & Repository Pattern | `pgxpool` PostgreSQL, file SQL `migrations/`, interface repository terpisah dari implementasi |
+| **Modul 4** | Clean Architecture | Pemisahan `model`, `repository`, `service` (`*_rules.go` & `*_service.go`), `config`, `database`, `helper`, `middleware`, `route` |
+| **Modul 5** | Authentication & Security | Password `bcrypt`, `POST /auth/register`, `POST /auth/login` (rate limiter), `POST /auth/refresh` (token rotation), JWT Bearer |
+| **Modul 6** | Authorization & RBAC | Tabel `roles`, `permissions`, `role_permissions`; 3 role (`admin`, `staff`, `customer`); `RequireAuth` & `RequirePermission` |
+| **Modul 7** | Advanced API Design | Cursor pagination + filter pada `GET /products` & `GET /orders`, `slog` structured logger + `lumberjack`, `RequestID`, `CORS`, header `Location` |
+| **Modul 9** | Transactions & Concurrency | `TxManager.WithTx`, penguncian baris `SELECT ... FOR UPDATE` pada `daily_production_loads` saat `POST /orders` & `cancel` + optimistic locking (`version`) |
+| **Modul 10** | API dengan MongoDB | Dual-DB `GET /health` (PostgreSQL + MongoDB) dan ulasan kue di MongoDB (`POST` & `GET /products/:id/reviews`, compound unique index `{product_id, user_id}`) |
+| **Modul 11** | Background Jobs & Async Processing | Transactional Outbox (`outbox` ditulis dalam transaksi `POST /orders` & `PATCH /orders/:id/status`) -> Relay -> Redis/Asynq Worker -> `notifications` (`GET /notifications/mine`) |
+| **Modul 12** | Testing, Swagger, & Docker | Unit test (`order_rules_test.go`), integration test (`//go:build integration`), anotasi Swagger + `go tool swag init` (`/swagger/*`), `Dockerfile` multi-stage non-root + `docker-compose.yml` (5 service) |
+
+---
+
+## 3. Profil Bisnis, Katalog, & Aturan Toko Kue
+
+### 3.1 Ringkasan Sistem
+- **Nama Sistem:** **BakeOrder** - Sistem Pemesanan Toko Kue *Made-to-Order* Berbasis Antrean & *Smart Dynamic Lead Time*.
+- **Konsep Utama:** Toko **tidak menyimpan stok kue jadi di lemari etalase** (`products` tidak memiliki kolom `stock`). Seluruh kue baru diproduksi berdasarkan **daftar pesanan** yang masuk baik secara **online** (pelanggan) maupun **di tempat / walk-in** (diinput kasir/staff).
+- **Data Wajib Pemesan:** Setiap pesanan mencatat **nama pemesan** (`customer_name`), **nomor telepon** (`customer_phone`), **jadwal pengambilan tanggal & jam** (`pickup_at`), serta kustomisasi per kategori.
+- **Pembayaran Manual & Bayar di Tempat:** Tidak memakai payment gateway. Pelanggan membayar di tempat atau transfer/QRIS manual, lalu kasir/staff mengonfirmasi pembayaran via `PATCH /orders/:id/payment` (`unpaid` -> `dp_paid` / `paid`). Opsi `dp_paid` melindungi toko dari pembatalan sepihak untuk kue ulang tahun kustom atau pesanan besar.
+
+### 3.2 Lima Kategori Kue & Aturan Kustomisasi (Diisi via SQL Seeder)
+
+| No | Kategori (`slug`) | Produk Contoh | Varian (`product_variants`) | Topping & Kustomisasi | Minimal Order | Lead Time Dasar |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Kue Ulang Tahun** (`birthday-cake`) | Kue Tart, Blackforest | Ukuran diameter (`16 cm`, `20 cm`, `24 cm`) | Request warna, tema desain, bentuk, teks ucapan (`custom_spec` JSONB) + **upload gambar referensi** (`reference_image_url`) | 1 kue | **4 jam** (dinamis) |
+| 2 | **Kue Bolu** (`sponge-cake`) | Bolu Original, Pandan, Mocca, Marmer, Coklat, Pisang, Tape | 7 varian rasa (`original`, `pandan`, `mocca`, `marmer`, `coklat`, `pisang`, `tape`) + ukuran loyang | Opsional request tambahan topping di atas: **seres**, **keju** | 1 loyang | **4 jam** (dinamis) |
+| 3 | **Kue Ulang Tahun Lainnya** (`other-birthday-cake`) | Bolu Petak, Brownies | Ukuran loyang / jumlah potong | Request topping, teks ucapan, desain sederhana, opsional upload referensi | 1 loyang | **4 jam** (dinamis) |
+| 4 | **Kue Basah** (`traditional-cake`) | Risol, Lapis, Donat, Dadar Gulung, Bolu Kukus, Kue Lumpur, Onde-Onde | Satuan per buah (`piece`) | Wajib penuhi **`min_order_qty`** produk (misal 10 atau 20 pcs). Khusus **Donat** bisa pilih topping: **seres**, **coklat crumble**, **tepung gula** | **Wajib >= `min_order_qty`** | **1 hari sebelum (`24 jam` / H-1)** |
+| 5 | **Kue Kering** (`cookies`) | Nastar, Kastengel, Semprit, Skippy, Putri Salju, Chocochips | Ukuran toples (`jar`): **1/2 kg (500 g)** dan **1 kg (1000 g)** | Harga mengikuti varian ukuran toples (`1/2 kg` vs `1 kg`) | 1 toples | **2 minggu sebelum (`336 jam` / H-14)** |
+
+---
+
+## 4. Spesifikasi Smart Dynamic Lead Time (`app/service/order_rules.go`)
+
+Karena produksi bersifat *made-to-order*, waktu pengambilan minimal (`earliest_pickup_at`) dihitung otomatis dari waktu pesan (`orderTime`), lead time dasar kategori, dan kepadatan antrean aktif pada tanggal target (`active_order_count` pada `daily_production_loads`).
+
+### 4.1 Rumus Murni (Pure Functions)
+```go
+type LeadTimeInput struct {
+    BaseLeadTimeHours int
+    BusyThreshold     int
+    ExtraHoursPerStep int
+    MaxExtraHours     int
+    ActiveOrderCount  int
+}
+
+func CalculateCategoryLeadHours(in LeadTimeInput) int {
+    extra := 0
+    if in.BusyThreshold > 0 && in.ExtraHoursPerStep > 0 {
+        steps := in.ActiveOrderCount / in.BusyThreshold
+        extra = steps * in.ExtraHoursPerStep
+        if in.MaxExtraHours > 0 && extra > in.MaxExtraHours {
+            extra = in.MaxExtraHours
+        }
+    }
+    return in.BaseLeadTimeHours + extra
+}
+```
+- **Contoh Kue Ulang Tahun** (`base=4`, `busy_threshold=5`, `extra_per_step=1`, `max_extra=4`):
+  - Antrean aktif hari itu `0..4` -> `steps = 0` -> minimal ambil **`orderTime + 4 jam`**.
+  - Antrean aktif hari itu `5..9` -> `steps = 1` -> minimal ambil otomatis naik menjadi **`orderTime + 5 jam`**.
+  - Antrean aktif hari itu `10..14` -> `steps = 2` -> minimal ambil otomatis naik menjadi **`orderTime + 6 jam`**.
+- **Contoh Kue Basah** (`base=24`, `busy_threshold=10`, `extra_per_step=12`, `max_extra=24`): normal minimal **24 jam (H-1)**; jika antrean padat (`>= 10`), naik menjadi 36 jam.
+- **Contoh Kue Kering** (`base=336`, `busy_threshold=15`, `extra_per_step=24`, `max_extra=72`): normal minimal **336 jam (2 minggu / H-14)**.
+- Jika satu pesanan berisi beberapa item lintas kategori, sistem mengambil nilai maksimum `earliest_pickup_at` dari seluruh kategori item yang dipesan.
+- Jika `pickup_at < earliest_pickup_at`, API menolak dengan `422` atau `409` kode `LEAD_TIME_NOT_MET` beserta waktu minimal yang diizinkan.
+
+### 4.2 Keamanan Transaksi & Konkurensi (`POST /orders` & `POST /orders/:id/cancel`)
+1. Mulai transaksi lewat `txManager.WithTx`.
+2. Untuk setiap `category_id` unik dalam pesanan pada tanggal `pickup_date = pickup_at.Date`:
+   - `INSERT INTO daily_production_loads (production_date, category_id, active_order_count) VALUES (...) ON CONFLICT DO NOTHING`
+   - Kunci baris dengan `SELECT ... FROM daily_production_loads WHERE production_date = $1 AND category_id = $2 FOR UPDATE`.
+   - Hitung ulang `earliest_pickup_at` memakai `active_order_count` terbaru yang terkunci (mencegah 2 request serentak pada pesanan ke-5 dan ke-6 sama-sama lolos aturan 4 jam!).
+   - Cek batas `max_daily_orders` (bila diatur > 0).
+   - Increment `active_order_count = active_order_count + 1` dan `version = version + 1`.
+3. Validasi `quantity >= product.min_order_qty`, validasi varian & topping milik produk terkait, dan hitung `unit_price` + `subtotal` + `total_price` di server (abaikan harga dari client!).
+4. Simpan `orders`, `order_items`, `order_item_toppings`, `order_status_logs`, serta tulis event `order.created` ke `outbox` **di dalam transaksi yang sama**.
+5. Saat `POST /orders/:id/cancel` (hanya boleh saat status `pending`), transaksi mengunci `orders` & `daily_production_loads` dengan `FOR UPDATE`, mengurangi `active_order_count` (`GREATEST(active_order_count - 1, 0)`), mengubah status menjadi `cancelled`, mencatat `order_status_logs`, dan memasukkan event `order.cancelled` ke `outbox`.
+
+---
+
+## 5. Rancangan Database Lengkap (PostgreSQL + MongoDB)
+
+### 5.1 Skema PostgreSQL (`migrations/`)
+
+- **`001_users_rbac.sql`**
+  - `users`: `id`, `name`, `username` (UK), `email` (UK), `password_hash`, `phone`, `role` (FK ke `roles`), `is_active`, `created_at`
+  - `refresh_tokens`: `id`, `user_id` (FK), `token_hash` (UK), `expires_at`, `revoked_at`, `created_at`
+  - `roles` (`admin`, `staff`, `customer`), `permissions`, `role_permissions`:
+    - `admin`: seluruh permission
+    - `staff`: `order:list`, `order:read:any`, `order:create:walkin`, `order:update:status`, `order:confirm:payment`
+    - `customer`: `order:create`, `order:read:own`, `order:cancel:own`, `review:create`
+- **`002_catalog_seed.sql`**
+  - `categories`: `id`, `slug` (UK), `name`, `description`, `base_lead_time_hours`, `busy_threshold`, `extra_hours_per_step`, `max_extra_hours`, `allows_custom_design`, `allows_reference_image`, `created_at`
+  - `products`: `id`, `category_id` (FK), `name`, `description`, `base_price` (BIGINT), `unit_type` (`cake`/`pan`/`piece`/`jar`), `min_order_qty`, `is_active`, `created_at`
+  - `product_variants`: `id`, `product_id` (FK), `variant_type` (`size`/`flavor`/`weight`), `name`, `price_adjustment` (BIGINT), `is_active`
+  - `toppings`: `id`, `name` (UK), `extra_price` (BIGINT), `is_active`
+  - `product_toppings`: `product_id` (PK, FK), `topping_id` (PK, FK)
+  - **Seeder bawaan:** langsung mengisi 5 kategori, seluruh daftar produk (Tart, Blackforest, Bolu 7 rasa, Bolu Petak, Brownies, Risol, Lapis, Donat, Dadar Gulung, Bolu Kukus, Kue Lumpur, Onde-Onde, Nastar, Kastengel, Semprit, Skippy, Putri Salju, Chocochips), varian ukuran/rasa/toples (`1/2 kg`, `1 kg`), serta mapping topping (Bolu -> seres/keju; Donat -> seres/coklat crumble/tepung gula).
+- **`003_orders.sql`**
+  - `daily_production_loads`: `id`, `production_date`, `category_id` (FK), `active_order_count`, `max_daily_orders`, `version`, `updated_at`, `UNIQUE (production_date, category_id)`, `CHECK (active_order_count >= 0)`
+  - `orders`: `id`, `order_code` (UK), `user_id` (FK nullable untuk walk-in), `customer_name`, `customer_phone`, `order_channel` (`online`/`walk_in`), `pickup_at` (`TIMESTAMPTZ`), `earliest_pickup_snapshot` (`TIMESTAMPTZ`), `notes`, `total_price` (`BIGINT`), `status` (`pending`/`confirmed`/`in_production`/`ready`/`completed`/`cancelled`/`rejected`), `payment_status` (`unpaid`/`dp_paid`/`paid`), `payment_method`, `paid_amount`, `payment_confirmed_by` (FK), `paid_at`, `created_at`, `updated_at`
+  - `order_items`: `id`, `order_id` (FK), `product_id` (FK), `variant_id` (FK nullable), `quantity`, `unit_price`, `subtotal`, `custom_spec` (`JSONB`), `reference_image_url` (`TEXT`)
+  - `order_item_toppings`: `id`, `order_item_id` (FK), `topping_id` (FK), `topping_name`, `extra_price`
+  - `order_status_logs`: `id`, `order_id` (FK), `actor_id` (FK), `from_status`, `to_status`, `note`, `created_at`
+- **`004_outbox_notifications.sql`**
+  - `outbox`: `id`, `event_type` (`order.created`, `order.status_changed`, `order.cancelled`), `payload` (`JSONB`), `created_at`, `published_at` (index parsial `WHERE published_at IS NULL`)
+  - `notifications`: `id`, `outbox_id`, `user_id` (FK), `channel`, `subject`, `body`, `sent_at`, `UNIQUE (outbox_id, user_id)`
+
+### 5.2 Skema MongoDB (`product_reviews`)
+Collection `product_reviews` menyimpan ulasan pelanggan terhadap kue yang pernah dipesan:
+- Fields dokumen BSON: `_id` (`ObjectID`), `product_id` (`int`), `user_id` (`int`), `username` (`string`), `rating` (`1..5`), `comment` (`string`), `tags` (`[]string`), `created_at`, `updated_at`.
+- Indexes:
+  1. Unique compound index `{product_id: 1, user_id: 1}` (`product_user_unique`) -> 1 pelanggan maksimal 1 ulasan per produk.
+  2. Compound index `{product_id: 1, _id: -1}` -> cursor pagination ulasan terbaru lebih dulu.
+
+---
+
+## 6. Spesifikasi 15 Endpoint Inti (`/api/v1`)
+
+| No | Method & Path | Auth & Role / Permission | Modul | Kontrak Singkat Request & Response |
 | --- | --- | --- | --- | --- |
-| 1 | Orang 1 *(nama & NIM menyusul)* | Terbiasa Go & Git | Git Master + Fondasi, Auth & RBAC | Setup repo public & branch protection, review & merge PR, scaffold core (`config`, `database`, `health`, `main`), Auth/RBAC (`CurrentUser`, `RequireAuth`, `RequirePermission`), dan notifikasi outbox (tahap UAS) |
-| 2 | Orang 2 *(nama & NIM menyusul)* | Pernah membuat REST API | Helper + Katalog 5 Kategori Kue | `AppError`, helper response, validator, `ErrorHandler`, serta modul Katalog Kue utuh (migrations, model, repository, service, route) dan setup Swagger (tahap UAS) |
-| 3 | Orang 3 *(nama & NIM menyusul)* | Sedang belajar Go | TxManager + Docs + Pesanan & Smart Lead Time | `DBTX` & `TxManager`, dokumentasi (`README.md`, ERD, role matrix), modul Pesanan Made-to-Order + Smart Dynamic Lead Time + upload referensi + konfirmasi pembayaran kasir, serta Docker & testing (tahap UAS) |
+| 1 | `GET /health` | Publik | 1, 3, 10 | Ping PostgreSQL & MongoDB -> `200` atau `503` |
+| 2 | `POST /auth/register` | Publik | 2, 5 | Body `{name, username, email, phone, password}` -> `201` + `Location` |
+| 3 | `POST /auth/login` | Publik (rate limit) | 5 | Body `{username, password}` -> `200` `TokenPair` (`access_token`, `refresh_token`) |
+| 4 | `POST /auth/refresh` | Publik | 5 | Body `{refresh_token}` -> rotasi token -> `200` `TokenPair` |
+| 5 | `GET /categories` | Publik | 3, 4 | Daftar 5 kategori beserta `base_lead_time_hours`, `busy_threshold`, aturan desain |
+| 6 | `GET /products` | Publik | 3, 7 | Query `?category_id=&search=&cursor=&limit=` -> daftar produk, varian, topping, `min_order_qty` (cursor meta) |
+| 7 | `POST /orders/estimate` | Terautentikasi | 4, 9 | Body `{pickup_at, items: [{product_id, variant_id, quantity, topping_ids}]}` -> mengembalikan `total_price`, `earliest_pickup_at`, dan flag apakah antrean padat (`is_busy`) |
+| 8 | `POST /orders` | Login (`order:create` / `order:create:walkin`) | 2, 9, 11 | Mendukung JSON atau `multipart/form-data` (untuk upload foto referensi desain kue ultah). Validasi `customer_name`, `customer_phone`, `pickup_at`, `min_order_qty`, kunci `daily_production_loads` (`FOR UPDATE`), simpan order + outbox -> `201` |
+| 9 | `GET /orders/mine` | Customer (`order:read:own`) | 6 | Daftar riwayat pesanan milik user yang sedang login |
+| 10 | `GET /orders` | Staff / Admin (`order:list`) | 6, 7 | Query `?status=&pickup_date=&cursor=&limit=` -> daftar antrean pesanan untuk dapur/kasir |
+| 11 | `PATCH /orders/:id/status` | Staff / Admin (`order:update:status`) | 6, 9, 11 | Body `{status, note}` (`confirmed`/`in_production`/`ready`/`completed`/`rejected`) -> update status + `order_status_logs` + event `outbox` |
+| 12 | `PATCH /orders/:id/payment` | Staff / Admin (`order:confirm:payment`) | 6, 9 | Body `{payment_status, payment_method, paid_amount}` (`dp_paid` atau `paid`) -> konfirmasi manual oleh kasir |
+| 13 | `POST /orders/:id/cancel` | Customer (`order:cancel:own`) | 9, 11 | Hanya saat `status == pending` -> ubah ke `cancelled`, kurangi `active_order_count` atomik + outbox |
+| 14 | `POST /products/:id/reviews` & `GET /products/:id/reviews` | Login (`review:create`) / Publik (`GET`) | 10 | Simpan & baca ulasan produk di **MongoDB** (pelanggan harus pernah punya order `completed` untuk produk tersebut) |
+| 15 | `GET /notifications/mine` | Terautentikasi | 11 | Daftar notifikasi status pesanan milik pelanggan yang sudah diproses worker Redis/Asynq |
+
+*(Total 15 endpoint inti di `/api/v1`, ditambah endpoint dokumentasi `/swagger/*` pada `route.go` saat `SWAGGER_ENABLED=true`.)*
 
 ---
 
-## 2. Profil Sistem
-
-### 2.1 Nama Sistem
-**BakeOrder** *(nama sementara, dapat disesuaikan kelompok)* - Sistem Pemesanan Toko Kue Made-to-Order dengan Estimasi Waktu Produksi Dinamis.
-
-### 2.2 Deskripsi Sistem
-Sistem ini melayani toko kue dengan model produksi **made-to-order (pre-order)**. Toko tidak menyediakan stok kue jadi di lemari etalase; seluruh kue dibuat berdasarkan **daftar antrean pesanan** yang masuk.
-
-Pemesanan dapat dilakukan secara **online** oleh pelanggan maupun **di tempat (walk-in)** melalui kasir. Setiap pesanan mencatat **nama pemesan**, **nomor telepon**, **jadwal pengambilan (tanggal dan jam)**, serta rincian kustomisasi kue per kategori (termasuk upload foto referensi desain). Karena tidak berbasis stok, sistem menerapkan **Smart Dynamic Lead Time**: setiap kategori memiliki waktu pembuatan minimal berbeda, dan ketika antrean pesanan pada tanggal tertentu meningkat padat, sistem secara otomatis menambahkan waktu tunggu minimal pengambilan (misalnya Kue Ulang Tahun dari minimal 4 jam otomatis naik menjadi 5 jam).
-
-### 2.3 Alur Pembayaran (Manual & Bayar di Tempat)
-- Pembayaran tidak memakai payment gateway otomatis; pelanggan membayar **langsung di tempat** atau melalui **pembayaran manual** (tunai / transfer manual / QRIS toko) yang **dikonfirmasi manual oleh kasir/staff**.
-- **Rekomendasi keamanan operasional (opsi DP manual):** Sistem memisahkan status pesanan (`orders.status`) dan status pembayaran (`orders.payment_status`: `unpaid`, `dp_paid`, `paid`). Untuk pesanan *walk-in* atau kue standar, pelanggan dapat melunasi saat pengambilan (`unpaid` -> `paid`). Untuk pesanan online kue kustom (Kue Ulang Tahun) atau pesanan jumlah besar (Kue Basah / Kue Kering), kasir dapat meminta DP manual (misal 30%-50%) dan menandai `dp_paid` sebelum dapur memulai produksi agar toko terlindungi dari pembatalan sepihak (*hit-and-run*).
-
----
-
-## 3. Katalog Kategori, Produk, Minimal Order, & Lead Time Dasar
-
-Sistem mengelompokkan produk ke dalam **5 kategori utama** tanpa kolom stok:
-
-| No | Kategori (`slug`) | Daftar Produk | Varian / Kemasan | Aturan Kustomisasi | Lead Time Dasar |
-| --- | --- | --- | --- | --- | --- |
-| 1 | **Kue Ulang Tahun** (`birthday-cake`) | Kue Tart, Blackforest | Ukuran/diameter (16 cm, 20 cm, 24 cm) | Request warna, tema desain, bentuk, teks ucapan, dan **upload gambar referensi** | **4 jam** (dinamis +1 jam per ambang antrean padat) |
-| 2 | **Kue Bolu** (`sponge-cake`) | Bolu Original, Pandan, Mocca, Marmer, Coklat, Pisang, Tape | 7 varian rasa, ukuran loyang | Opsional tambah topping di atas: **seres** atau **keju** | **4 jam** (dinamis saat padat) |
-| 3 | **Kue Ulang Tahun Lainnya** (`other-birthday-cake`) | Bolu Petak, Brownies | Ukuran loyang / jumlah potong | Request topping, teks ucapan, desain sederhana, opsional upload referensi | **4 jam** (dinamis saat padat) |
-| 4 | **Kue Basah** (`traditional-cake`) | Risol, Lapis, Donat, Dadar Gulung, Bolu Kukus, Kue Lumpur, Onde-Onde | Per buah (`piece`) | Wajib memenuhi **minimal jumlah pesanan (`min_order_qty`)** toko. Khusus **Donat** dapat memilih topping: **seres**, **coklat crumble**, **tepung gula**, dll. | **Minimal 1 hari sebelum** (`24 jam` / H-1) |
-| 5 | **Kue Kering** (`cookies`) | Nastar, Kastengel, Semprit, Skippy, Putri Salju, Chocochips | Per toples (`jar`): **1/2 kg (500 g)** atau **1 kg (1000 g)** | Harga menyesuaikan ukuran toples (`1/2 kg` atau `1 kg`) | **Minimal 2 minggu sebelum** (`336 jam` / 14 hari / H-14) |
-
----
-
-## 4. Mekanisme Smart Dynamic Lead Time (Penjadwalan Cerdas)
-
-Karena tidak ada stok siap jual, kelayakan jadwal pengambilan (`pickup_at`) ditentukan dari kombinasi **lead time dasar kategori** dan **kepadatan antrean pesanan aktif** pada tanggal pengambilan yang dipilih.
-
-### 4.1 Parameter Konfigurasi per Kategori (`categories`)
-- `base_lead_time_hours`: waktu pembuatan minimal dalam kondisi normal (Kue Ultah/Bolu/Ultah Lainnya = `4`, Kue Basah = `24`, Kue Kering = `336`).
-- `busy_threshold`: jumlah pesanan aktif pada tanggal & kategori yang sama sebelum sistem menaikkan waktu tunggu (misal Kue Ulang Tahun = `5` pesanan/hari).
-- `extra_hours_per_step`: tambahan waktu (jam) untuk setiap kelipatan `busy_threshold` yang terlampaui (misal Kue Ulang Tahun = `1` jam; Kue Basah = `12` atau `24` jam).
-- `max_extra_hours`: batas maksimal tambahan waktu dinamis (misal `4` jam untuk Kue Ulang Tahun).
-- `max_daily_orders` *(opsional)*: batas atas pesanan harian per kategori bila dapur sudah penuh total.
-
-### 4.2 Rumus Perhitungan (`CalculateEarliestPickup` di `app/service/order_rules.go`)
-Untuk setiap item dalam pesanan pada tanggal pengambilan target `D`:
-```text
-step        = floor(active_order_count / busy_threshold)
-extra_hours = min(step * extra_hours_per_step, max_extra_hours)
-total_hours = base_lead_time_hours + extra_hours
-earliest_i  = order_time + total_hours
-```
-Jika satu pesanan berisi lebih dari satu kategori (misalnya 1 Kue Tart + 20 Risol), sistem mengambil waktu paling lama:
-```text
-earliest_pickup_at = max(earliest_1, earliest_2, ..., earliest_n)
-```
-
-### 4.3 Contoh Skenario Nyata
-1. **Kondisi Normal (Kue Ulang Tahun):**
-   - Pelanggan memesan Kue Tart pukul `10:00`. Antrean aktif Kue Ulang Tahun hari ini berjumlah `2` (`< busy_threshold 5`).
-   - `extra_hours = 0` -> minimal pengambilan = `10:00 + 4 jam = 14:00`.
-2. **Kondisi Padat (Kue Ulang Tahun):**
-   - Pelanggan memesan Kue Tart pukul `10:00`. Antrean aktif Kue Ulang Tahun hari ini sudah `6` (`>= 5` dan `< 10`).
-   - `step = 1`, `extra_hours = +1 jam` -> sistem otomatis menaikkan minimal pengambilan dari **4 jam menjadi 5 jam** (`10:00 + 5 jam = 15:00`).
-   - Bila pelanggan tetap mengirim `pickup_at = 14:00`, endpoint `POST /orders` menolak dengan `422 / 409 LEAD_TIME_EXCEEDED` disertai info `earliest_pickup_at = 15:00`.
-3. **Kue Basah & Kue Kering:**
-   - Memesan 20 pcs Risol pada tanggal 18 Nov pukul `10:00` -> minimal pengambilan **19 Nov pukul `10:00`** (H-1 / 24 jam).
-   - Memesan 2 toples Nastar 1 kg pada tanggal 18 Nov -> minimal pengambilan **2 Desember** (H-14 / 2 minggu).
-
-### 4.4 Keamanan Konkurensi (Database Transaction)
-Saat dua pelanggan memesan bersamaan pada ambang batas antrean (misal pesanan ke-5 dan ke-6 masuk pada detik yang sama), transaksi `POST /orders` mengunci baris jadwal pada tabel `daily_production_loads` memakai `SELECT ... FOR UPDATE`, memvalidasi ulang `earliest_pickup_at`, lalu menambah `active_order_count` secara atomik. Bila pesanan dibatalkan (`cancelled`) atau ditolak (`rejected`), `active_order_count` dikurangi kembali dalam satu transaksi.
-
----
-
-## 5. Role dan Hak Akses (RBAC)
-
-| Role | Deskripsi | Hak Akses Utama |
-| --- | --- | --- |
-| **Admin** (`admin`) | Pemilik / pengelola toko | Kelola user & assign role; kelola katalog kategori, produk, varian, topping, `min_order_qty`, dan parameter Smart Lead Time (`base_lead_time_hours`, `busy_threshold`, `extra_hours_per_step`); pantau seluruh daftar pesanan & ringkasan operasional |
-| **Staff / Kasir** (`staff`) | Kasir & tim dapur produksi | Input pesanan langsung di tempat (*walk-in*); lihat daftar antrean pesanan harian & foto referensi desain; konfirmasi/tolak pesanan online; konfirmasi pembayaran manual (`unpaid` -> `dp_paid` -> `paid`); perbarui progres pembuatan (`in_production` -> `ready` -> `completed`) |
-| **Pelanggan** (`customer`) | Pembeli online | Registrasi & login; jelajahi katalog kue, opsi varian, topping, dan minimal order; cek estimasi waktu ambil tercepat secara otomatis; upload foto referensi; buat pesanan online (nama, nomor telepon, jadwal ambil); batalkan pesanan saat masih `pending`; pantau riwayat & status pesanan |
-
----
-
-## 6. Daftar Fitur Sistem
-
-| No | Fitur | Role | Tahap |
-| --- | --- | --- | --- |
-| 1 | Registrasi, login, refresh token (rotation), logout, dan profil `/auth/me` | Semua | Tahap 1 (Boilerplate) |
-| 2 | Kelola katalog kategori (termasuk aturan lead time & busy threshold), produk (`min_order_qty`), varian (rasa/ukuran/toples 1/2 kg & 1 kg), dan topping | Admin | Tahap 1 (**Fitur Utuh Pertama**) |
-| 3 | Lihat katalog kue per kategori lengkap dengan varian, topping valid, minimal order, dan estimasi waktu dasar | Semua | Tahap 1 (**Fitur Utuh Pertama**) |
-| 4 | Cek estimasi waktu pengambilan tercepat & kalkulasi harga otomatis (`POST /orders/estimate`) sesuai kepadatan antrean harian | Customer, Staff | Tahap 2 |
-| 5 | Upload foto referensi desain untuk Kue Ulang Tahun / Kue Ultah Lainnya (validasi tipe & ukuran gambar) | Customer, Staff | Tahap 2 |
-| 6 | Buat pesanan online maupun *walk-in* di kasir (wajib isi nama pemesan, no. telepon, jadwal `pickup_at`, validasi `min_order_qty` & Smart Dynamic Lead Time dalam transaksi atomik) | Customer, Staff | Tahap 2 |
-| 7 | Konfirmasi pembayaran manual oleh kasir (`unpaid` / `dp_paid` / `paid`) disertai metode & waktu bayar | Staff, Admin | Tahap 2 |
-| 8 | Daftar antrean produksi & pembaruan status pesanan (`confirmed`, `in_production`, `ready`, `completed`, `rejected`) + audit log `order_status_logs` | Staff, Admin | Tahap 2 |
-| 9 | Pembatalan pesanan oleh pelanggan saat status masih `pending` (otomatis menurunkan beban antrean tanggal tersebut) | Customer | Tahap 2 |
-| 10 | Notifikasi perubahan status pesanan asinkron (Transactional Outbox + Redis/Asynq worker) | Customer, Admin | Tahap 3 (UAS) |
-| 11 | Unit test (khususnya `order_rules_test.go` untuk Smart Lead Time & `min_order_qty`), integration test PostgreSQL, Swagger UI, dan Docker Compose | Tim Pengembang | Tahap 3 (UAS) |
-
-### Alur Status Pesanan & Status Pembayaran
-```text
-Status Pesanan (orders.status):
-pending ──► confirmed ──► in_production ──► ready ──► completed
-   │            │
-   ├──► cancelled (oleh customer saat status pending)
-   └──► rejected  (oleh staff/admin disertai alasan)
-
-Status Pembayaran (orders.payment_status - konfirmasi manual kasir):
-unpaid ──► dp_paid (opsional DP) ──► paid
-```
-
----
-
-## 7. Rancangan Database (PostgreSQL)
-
-### 7.1 Daftar Tabel Utama
-
-| Tabel | Kolom Utama | Relasi & Keterangan |
-| --- | --- | --- |
-| `users` | `id`, `name`, `username`, `email`, `password_hash`, `phone`, `role`, `is_active`, `created_at` | Akun `admin`, `staff`, dan `customer`. Satu user dapat memiliki banyak `orders` |
-| `refresh_tokens` | `id`, `user_id`, `token_hash`, `expires_at`, `revoked_at`, `created_at` | Mendukung rotasi refresh token dan logout |
-| `roles`, `permissions`, `role_permissions` | `name`, `description`, `role_name`, `permission_name` | Konfigurasi RBAC sesuai Modul 6 |
-| `categories` | `id`, `slug`, `name`, `description`, `base_lead_time_hours`, `busy_threshold`, `extra_hours_per_step`, `max_extra_hours`, `allows_custom_design`, `allows_reference_image`, `created_at` | Menyimpan 5 kategori kue beserta aturan Smart Dynamic Lead Time per kategori |
-| `products` | `id`, `category_id`, `name`, `description`, `base_price`, `unit_type`, `min_order_qty`, `lead_time_hours_override`, `is_active`, `created_at` | Tanpa kolom stok; menyimpan `min_order_qty` (kue basah) dan override lead time bila ada produk khusus |
-| `product_variants` | `id`, `product_id`, `variant_type`, `name`, `price_adjustment`, `is_active` | Varian rasa bolu (7 rasa), ukuran kue ultah, atau berat toples kue kering (`1/2 kg`, `1 kg`) |
-| `toppings` | `id`, `name`, `extra_price`, `is_active` | Master topping (`seres`, `keju`, `coklat crumble`, `tepung gula`, dll.) |
-| `product_toppings` | `product_id`, `topping_id` | Mapping topping yang diperbolehkan untuk produk tertentu |
-| `daily_production_loads` | `id`, `production_date`, `category_id`, `active_order_count`, `max_daily_orders`, `version`, `updated_at` | Mencatat jumlah pesanan aktif per `(production_date, category_id)` sebagai dasar perhitungan Smart Dynamic Lead Time dan penguncian konkurensi |
-| `orders` | `id`, `order_code`, `user_id` (nullable untuk *walk-in*), `customer_name`, `customer_phone`, `order_channel` (`online`/`walk_in`), `pickup_at` (`TIMESTAMPTZ`), `earliest_pickup_snapshot` (`TIMESTAMPTZ`), `notes`, `total_price`, `status`, `payment_status` (`unpaid`/`dp_paid`/`paid`), `payment_method`, `paid_amount`, `payment_confirmed_by`, `paid_at`, `created_at`, `updated_at` | Daftar antrean pesanan utama; menyimpan nama & nomor telepon pemesan, jadwal ambil lengkap dengan jam, serta konfirmasi bayar manual kasir |
-| `order_items` | `id`, `order_id`, `product_id`, `variant_id`, `quantity`, `unit_price`, `subtotal`, `custom_spec` (`JSONB`), `reference_image_url` | Item pesanan beserta spesifikasi kustom (warna, bentuk, desain, ucapan) dalam `JSONB` dan path foto referensi |
-| `order_item_toppings` | `id`, `order_item_id`, `topping_id`, `topping_name`, `extra_price` | Snapshot topping tambahan yang dipilih pada item pesanan |
-| `order_status_logs` | `id`, `order_id`, `actor_id`, `from_status`, `to_status`, `note`, `created_at` | Audit trail setiap perubahan status pesanan maupun pembayaran |
-| `outbox` & `notifications` | `id`, `event_type`, `payload`, `published_at` / `id`, `outbox_id`, `user_id`, `subject`, `body`, `sent_at` | Disiapkan untuk notifikasi status pesanan asinkron pada Tahap 3 (UAS) |
-
-### 7.2 Diagram ERD (Mermaid)
-
-```mermaid
-erDiagram
-    users ||--o{ refresh_tokens : "has"
-    users ||--o{ orders : "places_or_confirms"
-    users ||--o{ order_status_logs : "records"
-    categories ||--o{ products : "groups"
-    categories ||--o{ daily_production_loads : "tracks_load"
-    products ||--o{ product_variants : "has"
-    products ||--o{ product_toppings : "allows"
-    toppings ||--o{ product_toppings : "mapped_to"
-    orders ||--|{ order_items : "contains"
-    orders ||--o{ order_status_logs : "logs"
-    products ||--o{ order_items : "ordered_in"
-    product_variants ||--o{ order_items : "selected_in"
-    order_items ||--o{ order_item_toppings : "includes"
-    toppings ||--o{ order_item_toppings : "chosen_as"
-
-    users {
-        serial id PK
-        varchar name
-        varchar username UK
-        varchar email UK
-        text password_hash
-        varchar phone
-        varchar role
-        boolean is_active
-    }
-
-    categories {
-        serial id PK
-        varchar slug UK
-        varchar name
-        int base_lead_time_hours
-        int busy_threshold
-        int extra_hours_per_step
-        int max_extra_hours
-        boolean allows_custom_design
-        boolean allows_reference_image
-    }
-
-    products {
-        serial id PK
-        int category_id FK
-        varchar name
-        bigint base_price
-        varchar unit_type
-        int min_order_qty
-        int lead_time_hours_override
-        boolean is_active
-    }
-
-    product_variants {
-        serial id PK
-        int product_id FK
-        varchar variant_type
-        varchar name
-        bigint price_adjustment
-    }
-
-    toppings {
-        serial id PK
-        varchar name UK
-        bigint extra_price
-    }
-
-    product_toppings {
-        int product_id PK,FK
-        int topping_id PK,FK
-    }
-
-    daily_production_loads {
-        serial id PK
-        date production_date
-        int category_id FK
-        int active_order_count
-        int max_daily_orders
-        int version
-    }
-
-    orders {
-        bigserial id PK
-        varchar order_code UK
-        int user_id FK
-        varchar customer_name
-        varchar customer_phone
-        varchar order_channel
-        timestamptz pickup_at
-        timestamptz earliest_pickup_snapshot
-        bigint total_price
-        varchar status
-        varchar payment_status
-        varchar payment_method
-        bigint paid_amount
-        int payment_confirmed_by FK
-        timestamptz paid_at
-        timestamptz created_at
-    }
-
-    order_items {
-        bigserial id PK
-        bigint order_id FK
-        int product_id FK
-        int variant_id FK
-        int quantity
-        bigint unit_price
-        bigint subtotal
-        jsonb custom_spec
-        text reference_image_url
-    }
-
-    order_item_toppings {
-        bigserial id PK
-        bigint order_item_id FK
-        int topping_id FK
-        varchar topping_name
-        bigint extra_price
-    }
-
-    order_status_logs {
-        bigserial id PK
-        bigint order_id FK
-        int actor_id FK
-        varchar from_status
-        varchar to_status
-        text note
-        timestamptz created_at
-    }
-```
-
----
-
-## 8. Rancangan Endpoint API (`/api/v1`)
-
-| Kelompok | Method & Path | Role / Akses | Keterangan |
-| --- | --- | --- | --- |
-| **Health** | `GET /health` | Publik | Cek status server & koneksi database |
-| **Auth** | `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout` | Publik | Autentikasi & rotasi refresh token |
-| **Auth** | `GET /auth/me` | Terautentikasi | Profil dan daftar permission akun login |
-| **Categories** | `GET /categories`, `GET /categories/:id` | Publik | Daftar 5 kategori beserta aturan lead time dan opsi kustomisasi |
-| **Categories** | `POST /categories`, `PATCH /categories/:id`, `DELETE /categories/:id` | Admin | Kelola kategori & parameter Smart Dynamic Lead Time |
-| **Products** | `GET /products`, `GET /products/:id` | Publik | Katalog produk (filter `category_id`, `search`), varian, topping valid, dan `min_order_qty` |
-| **Products** | `POST /products`, `PUT /products/:id`, `DELETE /products/:id` | Admin | Kelola katalog kue, varian rasa/ukuran/toples, dan mapping topping |
-| **Toppings** | `GET /toppings`, `POST /toppings`, `PATCH /toppings/:id`, `DELETE /toppings/:id` | Publik (`GET`) / Admin | Kelola master topping |
-| **Uploads** | `POST /uploads/reference` | Customer, Staff | Upload foto referensi desain kue ulang tahun |
-| **Estimate** | `POST /orders/estimate` | Publik / Login | Hitung estimasi total harga dan `earliest_pickup_at` dinamis berdasarkan kepadatan antrean tanggal target |
-| **Orders** | `POST /orders` | Customer (`online`), Staff (`walk_in`) | Buat pesanan (nama, no. telp, `pickup_at`, kustomisasi); validasi `min_order_qty` & lead time dinamis dalam transaksi |
-| **Orders** | `GET /orders/mine`, `GET /orders/:id` | Customer (milik sendiri), Staff, Admin | Riwayat dan detail pesanan beserta item, foto referensi, status bayar, dan log status |
-| **Orders** | `POST /orders/:id/cancel` | Customer | Batalkan pesanan saat status `pending` (mengurangi beban antrean harian) |
-| **Orders** | `GET /orders` | Staff, Admin | Daftar antrean produksi & pencarian berdasarkan tanggal ambil (`pickup_date`), kategori, atau status |
-| **Orders** | `PATCH /orders/:id/status` | Staff, Admin | Konfirmasi, tolak, atau perbarui progres produksi (`confirmed` -> `in_production` -> `ready` -> `completed` / `rejected`) |
-| **Orders** | `PATCH /orders/:id/payment` | Staff, Admin | Konfirmasi pembayaran manual oleh kasir (`unpaid` -> `dp_paid` / `paid`, nominal, dan metode bayar) |
-
----
-
-## 9. Arsitektur Boilerplate Go (Clean Architecture Sesuai Modul)
-
-Struktur folder mengikuti Clean Architecture dari modul praktikum sebelumnya dan **tidak memakai istilah atau layer `controller` maupun `handler`**:
+## 7. Struktur Folder Clean Architecture
 
 ```text
 UAS_KEL1_PBL/
 ├── app/
-│   ├── model/              # Struct domain, request DTO, response DTO (user, category, product, order)
-│   ├── repository/         # Interface & implementasi query PostgreSQL, DBTX, dan TxManager
-│   └── service/            # Aturan bisnis murni (order_rules.go, catalog_rules.go) dan method endpoint Fiber
-├── config/                 # Loader .env, slog logger, dan Fiber app + ErrorHandler terpusat
-├── database/               # Pool koneksi PostgreSQL (pgxpool)
-├── docs/                   # Hasil generate Swagger (go tool swag init)
-├── helper/                 # JWTManager, bcrypt, validator, response helper, AppError, upload gambar
-├── middleware/             # RequestID, logging, CORS, RequireJSON, RequireAuth, RequirePermission
-├── migrations/             # File migrasi SQL berurutan (001_users_rbac.sql, 002_catalog.sql, 003_orders.sql, ...)
-├── route/                  # Registrasi endpoint & dependency injection
+│   ├── model/
+│   │   ├── common.go           # WebResponse, ErrorResponse, CursorMeta
+│   │   ├── user.go             # User, AuthUser, RegisterRequest, LoginRequest, TokenPair
+│   │   ├── catalog.go          # Category, Product, ProductVariant, Topping, ProductReview
+│   │   ├── order.go            # Order, OrderItem, CustomSpec, CreateOrderRequest, EstimateResponse, OrderStatusLog
+│   │   └── notification.go     # OutboxEvent, NotificationJob, Notification
+│   ├── repository/
+│   │   ├── dbtx.go             # Interface DBTX & TxManager (WithTx / WithTxOnce)
+│   │   ├── errors.go           # ErrNotFound, ErrDuplicate, ErrInvalidID, pgErrorCode helper
+│   │   ├── user_repository.go
+│   │   ├── token_repository.go
+│   │   ├── role_repository.go
+│   │   ├── catalog_repository.go
+│   │   ├── order_repository.go
+│   │   ├── review_repository.go       # MongoDB collection product_reviews
+│   │   ├── outbox_repository.go
+│   │   └── notification_repository.go
+│   └── service/
+│       ├── auth_rules.go
+│       ├── auth_service.go
+│       ├── order_rules.go             # Smart Dynamic Lead Time + min_order_qty + kalkulasi harga
+│       ├── order_rules_test.go        # Unit test table-driven & subtest
+│       ├── catalog_service.go
+│       ├── order_service.go
+│       ├── review_service.go
+│       ├── outbox_relay.go
+│       ├── notification_worker.go
+│       └── notification_service.go
+├── config/
+│   ├── env.go
+│   ├── logger.go
+│   ├── queue.go
+│   └── app.go                  # fiber.New + ErrorHandler terpusat
+├── database/
+│   ├── postgres.go
+│   └── mongo.go
+├── docs/                       # Hasil go tool swag init
+├── helper/
+│   ├── context.go
+│   ├── cursor.go
+│   ├── errors.go               # AppError & konstruktor error HTTP
+│   ├── jwt.go
+│   ├── mailer.go
+│   ├── request.go
+│   ├── response.go
+│   ├── security.go
+│   ├── upload.go               # Validasi & penyimpanan foto referensi desain
+│   └── validator.go
+├── middleware/
+│   ├── auth.go
+│   ├── authz.go
+│   └── middleware.go
+├── migrations/
+│   ├── 001_users_rbac.sql
+│   ├── 002_catalog_seed.sql
+│   ├── 003_orders.sql
+│   └── 004_outbox_notifications.sql
+├── route/
+│   └── route.go
 ├── tests/
-│   └── integration/        # Integration test (//go:build integration)
-├── uploads/                # File gambar referensi desain kue (.gitignore)
+│   └── integration/
+│       ├── main_test.go
+│       └── order_concurrency_test.go
+├── .dockerignore
 ├── .env.example
 ├── .gitignore
 ├── Dockerfile
@@ -338,77 +252,34 @@ UAS_KEL1_PBL/
 
 ---
 
-## 10. Ketentuan Kerja GitHub, Micro Commits, & Pembagian Branch (3 Anggota)
+## 8. Pembagian Jobdesk Detail, Branch, & Checklist File per Anggota
 
-### 10.1 Aturan Inti
-1. **Jangan pernah commit atau push langsung ke `main`.**
-2. **Satu branch = satu sub-fitur/tugas**, dikerjakan dengan beberapa **micro commits** (kecil, fokus satu perubahan per commit, bukan satu commit besar).
-3. Branch dibuat **saat mulai mengerjakan tugas** dari `main` terbaru (tidak perlu pre-create semua branch di awal agar terhindar dari konflik).
-4. Semua perubahan masuk ke `main` melalui **Pull Request (PR)**.
-5. Hanya **Git Master (Orang 1)** yang melakukan review dan merge PR ke `main` menggunakan **Create a merge commit** (dilarang Squash agar kontribusi tiap anggota tetap tercatat di *Insights -> Contributors*).
-6. Format pesan commit mengikuti Conventional Commits `type(scope): pesan` (`feat`, `fix`, `test`, `docs`, `chore`, `refactor`), contoh: `feat(model): add Category and Product structs`.
-7. Seluruh kode wajib mengikuti Clean Architecture modul praktikum (**tanpa** folder atau istilah `controller` maupun `handler`).
+Aturan mutlak: **1 branch = 1 tugas**, semua perubahan masuk `main` lewat **Pull Request** dan di-merge oleh **Git Master (Orang 1)** menggunakan **Create a merge commit**. Tidak ada push langsung ke `main` setelah fase inisialisasi proyek.
 
-### 10.2 Setup Awal (Sekali per Laptop)
-- Terima undangan collaborator di GitHub.
-- Clone repositori: `git clone https://github.com/Tullannghoda/UAS_PBL_K1.git && cd UAS_PBL_K1`
-- Atur identitas Git agar email **sama persis** dengan akun GitHub:
-  - `git config user.name "Nama Kamu"`
-  - `git config user.email "email-yang-sama-dengan-akun-GitHub"`
-- Setelah `.env.example` tersedia di `main`, salin menjadi `.env` secara lokal. Jangan pernah meng-commit `.env`.
+### Orang 1 — Glennovian Benhur United Lumbantoruann / `434241044` (Git Master + Fondasi, Auth/RBAC, & Modul 11 Outbox/Worker)
+1. **`chore/scaffold-core`** (atau setup awal `main`):
+   - File: `go.mod`, `.gitignore`, `.env.example`, `config/env.go`, `config/logger.go`, `config/app.go`, `database/postgres.go`, `database/mongo.go`, `route/route.go` (kerangka + `GET /health`), `main.go`.
+2. **`feat/auth-rbac`** (Modul 5 & 6):
+   - File: `migrations/001_users_rbac.sql`, `app/model/user.go`, `app/repository/user_repository.go`, `token_repository.go`, `role_repository.go`, `helper/jwt.go`, `helper/security.go`, `middleware/auth.go`, `middleware/authz.go`, `app/service/auth_rules.go`, `app/service/auth_service.go`.
+3. **`feat/outbox-notifications`** (Modul 11):
+   - File: `migrations/004_outbox_notifications.sql`, `app/model/notification.go`, `app/repository/outbox_repository.go`, `notification_repository.go`, `config/queue.go`, `helper/mailer.go`, `app/service/outbox_relay.go`, `notification_worker.go`, `notification_service.go`, update `worker` wiring di `main.go`.
 
-### 10.3 Rencana Pembagian Branch & Urutan Kerja
-- **Orang 1 (Git Master - Fondasi + Auth & RBAC):**
-  - `chore/scaffold-core`: `go.mod`, `.gitignore`, `.env.example`, `config`, logger, pool PostgreSQL, `/health`, `main.go`
-  - `feat/auth-rbac`: migration `users` & RBAC, model, repository, JWT, middleware auth/permission, auth service
-  - `feat/outbox-notifications` *(Tahap UAS)*: outbox + worker notifikasi status pesanan
-- **Orang 2 (Helper + Katalog 5 Kategori Kue - Fitur Utuh Pertama):**
-  - `feat/helper-errorhandler`: `AppError`, helper response, validator, centralized `ErrorHandler`
-  - `feat/catalog-data`: migration 5 kategori kue, produk, varian, topping + model + repository
-  - `feat/catalog-service`: aturan bisnis katalog + service + route katalog
-  - `docs/swagger-setup` *(Tahap UAS)*: anotasi Swagger & generate `docs/`
-- **Orang 3 (TxManager + Docs + Pesanan & Smart Lead Time):**
-  - `feat/database-txmanager`: interface `DBTX` & `TxManager`
-  - `docs/readme-erd`: `README.md`, gambar ERD, role matrix, dan pembaruan nama/NIM anggota
-  - `feat/order-data`: migration `orders`, `order_items`, `daily_production_loads`, `order_status_logs` + model + repository
-  - `feat/order-smart-leadtime`: aturan Smart Dynamic Lead Time (`4 jam -> 5 jam`, H-1 kue basah + `min_order_qty`, H-14 kue kering), upload referensi, service pesanan, & konfirmasi pembayaran manual kasir
-  - `chore/docker-tests` *(Tahap UAS)*: `Dockerfile`, `docker-compose.yml`, unit & integration test
+### Orang 2 — Alisya Aninda Safwa / `434241032` (Helper/Error + Seeder & Read Katalog + Modul 10 MongoDB + Swagger)
+1. **`feat/helper-errorhandler`** (Modul 2 & 4):
+   - File: `app/model/common.go`, `helper/errors.go`, `helper/response.go`, `helper/request.go`, `helper/validator.go`, `helper/cursor.go`, `helper/context.go`, `middleware/middleware.go`.
+2. **`feat/catalog-module`** (Modul 3, 4, 7 — **Fitur Utuh Pertama**):
+   - File: `migrations/002_catalog_seed.sql`, `app/model/catalog.go`, `app/repository/catalog_repository.go`, `app/service/catalog_service.go`, dan registrasi `GET /categories`, `GET /products` di `route/route.go`.
+3. **`feat/mongodb-reviews`** (Modul 10):
+   - File: `app/repository/review_repository.go`, `app/service/review_service.go`, registrasi `POST` & `GET /products/:id/reviews`.
+4. **`docs/swagger-setup`** (Modul 12):
+   - Menambahkan komentar anotasi Swagger di `main.go` dan file `app/service/*_service.go`, route `/swagger/*`, serta generate folder `docs/`.
 
-**Urutan Fase Kerja:**
-- **Fase 1 (Fondasi paralel):** Orang 1 mengerjakan `chore/scaffold-core` & `feat/auth-rbac`, Orang 2 mengerjakan `feat/helper-errorhandler`, Orang 3 mengerjakan `feat/database-txmanager` & `docs/readme-erd`.
-- **Fase 2 (Fitur Inti):** Setelah fondasi masuk `main`, Orang 2 menyelesaikan fitur Katalog Kue sampai jalan utuh, dan Orang 3 mengerjakan modul Pesanan + Smart Lead Time + konfirmasi bayar kasir.
-- **Fase 3 (Finalisasi UAS):** Notifikasi outbox/worker, dokumentasi Swagger, unit/integration testing, dan Docker Compose.
-
-### 10.4 Alur Kerja Harian, Cek Sebelum Commit, Konflik, & Larangan
-1. Ambil `main` terbaru lalu buat branch tugas:
-   ```bash
-   git checkout main
-   git pull origin main
-   git checkout -b feat/nama-branch
-   ```
-2. Kerjakan perubahan dengan micro commits dan push ke branch tugas:
-   ```bash
-   git status
-   git add <file-yang-dikerjakan>
-   git commit -m "feat(model): add Product struct"
-   git push -u origin feat/nama-branch
-   ```
-3. Buka GitHub, buat Pull Request ke `main`, lalu tunggu review dan merge dari Git Master. Setelah PR ter-merge, kembali ke `main` dan jalankan `git pull origin main` sebelum membuat branch baru.
-4. **Cek sebelum commit:** `git branch` memastikan `*` tidak berada di `main`; `git status` memastikan `.env`, `logs/`, dan `uploads/` tidak ikut; tab *Files changed* pada PR hanya memuat file milik tugas tersebut.
-5. **Penanganan konflik:** Jangan menimpa pekerjaan anggota lain. Laporkan di grup; konflik pada `main.go` dan `route/route.go` diselesaikan oleh Git Master.
-6. **Dilarang keras:** push langsung ke `main`, commit `.env`/`logs/`/`uploads/`, menjalankan `git push --force`, atau memakai Squash saat merge PR.
-
----
-
-## 11. Roadmap Progres
-
-### Progres 1 (Laporan Progres Kamis, 19 November 2026)
-- [x] Rancangan sistem lengkap di `project.md` (5 kategori kue made-to-order, konfirmasi pembayaran manual di tempat, Smart Dynamic Lead Time, role RBAC, skema DB + ERD, desain API, dan ketentuan kerja GitHub 3 anggota).
-- [x] Pembuatan repositori GitHub public terpisah (`https://github.com/Tullannghoda/UAS_PBL_K1.git`).
-- [ ] Pengisian nama/NIM anggota, aktivasi branch protection `main`, dan undang collaborator.
-- [ ] Inisialisasi struktur folder boilerplate Go & `README.md` (plus gambar ERD).
-
-### Progres 2 (Menuju UAS)
-- [ ] Fitur utuh tahap awal: Auth RBAC + CRUD Katalog (`categories`, `products`, `product_variants`, `toppings`).
-- [ ] Implementasi penuh `POST /orders/estimate`, `POST /orders` dengan Smart Dynamic Lead Time & kuncian `daily_production_loads`, upload gambar referensi, serta konfirmasi pembayaran manual kasir.
-- [ ] Unit test (`order_rules_test.go`), integration test konkurensi antrean, notifikasi asinkron (outbox + worker), dokumentasi Swagger, dan `docker compose`.
+### Orang 3 — Mellinda Impiawati / `434231032` (TxManager + Docs/ERD + Pesanan & Smart Lead Time + Test & Docker)
+1. **`feat/database-txmanager`** (Modul 3 & 9):
+   - File: `app/repository/dbtx.go`, `app/repository/errors.go`.
+2. **`docs/readme-erd`** (Dokumentasi Proyek):
+   - Melengkapi/memperbarui diagram ERD (`Mermaid` / `draw.io` / `dbdiagram.io`) dan contoh payload di `README.md` bila diperlukan.
+3. **`feat/order-smart-leadtime`** (Modul 4, 6, 7, 9):
+   - File: `migrations/003_orders.sql`, `app/model/order.go`, `app/repository/order_repository.go`, `helper/upload.go`, `app/service/order_rules.go` (Smart Dynamic Lead Time 4→5 jam, H-1 + `min_order_qty`, H-14), `app/service/order_service.go` (`Estimate`, `Create`, `Mine`, `List`, `UpdateStatus`, `ConfirmPayment`, `Cancel`), dan registrasi route pesanan.
+4. **`chore/tests-docker`** (Modul 12):
+   - File: `app/service/order_rules_test.go`, `tests/integration/main_test.go`, `tests/integration/order_concurrency_test.go`, `Dockerfile`, `.dockerignore`, `docker-compose.yml`.
